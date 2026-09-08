@@ -137,6 +137,20 @@ tick, so live edits, scrolling, and resizing are all handled automatically —
 a star will quietly step aside (or gracefully despawn) rather than ever
 covering a character of your code.
 
+## Filling the *whole* window, even for a 3-line file
+
+Neovim can only attach decorations to real buffer lines, so a naive
+implementation only twinkles across however many lines your file has — a
+20-line file gets 20 lines of sky, a 3-line file gets 3. That's not what
+"twinkle everywhere while coding" means.
+
+To fix this, starfall.nvim renders the blank `~` area below your last line
+as one shared virtual canvas (via `virt_lines`), sized to exactly fill the
+rest of the window. Ambient stars are spawned across real lines *and* that
+canvas proportionally, and falling stars fall straight through your code and
+keep going into the blank space below it, all the way to the bottom of the
+window — so even a one-line file gets a full screen of sky.
+
 ## License
 
 MIT

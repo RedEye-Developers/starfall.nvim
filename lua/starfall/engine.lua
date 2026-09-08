@@ -9,12 +9,12 @@ local ns = vim.api.nvim_create_namespace("starfall")
 ---@class StarfallWinCtx
 ---@field buf integer
 ---@field stars table[]
+---@field filler_id integer|nil  -- extmark id of the shared below-EOF canvas
 
 local state = {
   active = false,
   timer = nil,
   cfg = nil,
-  augroup = nil,
   -- winid -> StarfallWinCtx
   contexts = {},
 }
@@ -22,15 +22,23 @@ local state = {
 math.randomseed(os.time())
 
 -- ============================================================================
--- Geometry helpers: figure out which screen cells are "empty" (safe to draw
--- a star on) vs. covered by real text, so stars never overlap your code.
+-- Geometry: figure out (a) which columns on real buffer lines are free of
+-- text, and (b) how many blank screen rows exist below the last buffer line
+-- (the "~" area), so stars can roam the *entire* visible window -- not just
+-- the lines your file happens to have.
 -- ============================================================================
 
----Returns {width, topline, botline} in the coordinate space used by
----'virt_text_win_col' (i.e. text-area columns, excluding number/sign/fold
----columns), or nil if the window is not currently valid/visible.
-local function win_text_info(win)
-  if not vim.api.nvim_win_is_valid(win) then
+---Computes a full layout snapshot for a window/buffer pair:
+---  width       - usable text-area columns (matches virt_text_win_col space)
+---  height      - visible text rows in the window
+---  topline/botline - first/last visible buffer line (1-indexed, real lines)
+---  real_rows   - how many of those visible rows are real buffer lines
+---  filler_rows - how many visible rows are blank "~" rows below EOF
+---  total_rows  - real_rows + filler_rows
+---  line_count/last_row - buffer size info, for detecting EOF transitions
+---Returns nil if the window/buffer isn't currently valid.
+local function compute_layout(win, buf)
+  if not vim.api.nvim_win_is_valid(win) or not vim.api.nvim_buf_is_valid(buf) then
     return nil
   end
   local ok, info = pcall(vim.fn.getwininfo, win)
@@ -42,7 +50,31 @@ local function win_text_info(win)
   if width <= 0 then
     return nil
   end
-  return { width = width, topline = wi.topline, botline = wi.botline }
+
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  local topline = wi.topline
+  local botline = math.min(wi.botline, line_count)
+  local real_rows = math.max(0, botline - topline + 1)
+
+  -- Only claim filler rows when the window's bottom edge actually shows EOF
+  -- (i.e. there's nothing left to scroll to) -- otherwise the "blank" area
+  -- is really just unscrolled buffer content we haven't reached yet.
+  local filler_rows = 0
+  if wi.botline >= line_count then
+    filler_rows = math.max(0, wi.height - real_rows)
+  end
+
+  return {
+    width = width,
+    height = wi.height,
+    topline = topline,
+    botline = botline,
+    real_rows = real_rows,
+    filler_rows = filler_rows,
+    total_rows = real_rows + filler_rows,
+    line_count = line_count,
+    last_row = line_count - 1,
+  }
 end
 
 local function get_line(buf, row0)
@@ -60,10 +92,9 @@ local function get_line(buf, row0)
   return lines[1]
 end
 
----Computes the list of [from, to) column ranges on `line` that are free of
----real text (leading indentation and/or the blank area past end-of-line),
----respecting the configured margin so stars keep a comfortable distance from
----any characters.
+---Computes [from, to) column ranges on `line` that are free of real text
+---(leading indentation and/or the blank area past end-of-line), respecting
+---the configured margin.
 local function safe_ranges(line, width, margin)
   if width <= 0 then
     return {}
@@ -153,14 +184,14 @@ local function sync_contexts()
         seen[win] = true
         local ctx = state.contexts[win]
         if not ctx then
-          state.contexts[win] = { buf = buf, stars = {} }
+          state.contexts[win] = { buf = buf, stars = {}, filler_id = nil }
         elseif ctx.buf ~= buf then
           -- Buffer changed underneath the window (e.g. :bnext); drop old
-          -- decorations and re-check eligibility next tick via a fresh ctx.
+          -- decorations and start fresh.
           if vim.api.nvim_buf_is_valid(ctx.buf) then
             vim.api.nvim_buf_clear_namespace(ctx.buf, ns, 0, -1)
           end
-          state.contexts[win] = { buf = buf, stars = {} }
+          state.contexts[win] = { buf = buf, stars = {}, filler_id = nil }
         end
       end
     end
@@ -180,51 +211,66 @@ end
 -- Ambient twinkling stars
 -- ============================================================================
 
-local function render_twinkle(ctx, star)
-  if not vim.api.nvim_buf_is_valid(ctx.buf) then
-    return
-  end
+---Renders one twinkle star for this tick. Buffer-region stars get their own
+---reusable extmark; filler-region stars (below EOF) are queued so they can
+---be batched into the shared below-EOF canvas.
+local function render_twinkle(ctx, star, queue)
   local ch = state.cfg.twinkle_chars[star.stage]
-  local opts = {
-    id = star.id,
-    virt_text = { { ch, star.hl } },
-    virt_text_win_col = star.col,
-    hl_mode = "combine",
-    priority = 90,
-  }
-  local ok, id = pcall(vim.api.nvim_buf_set_extmark, ctx.buf, ns, star.row, 0, opts)
-  if ok then
-    star.id = id
+  if star.region == "buffer" then
+    if not vim.api.nvim_buf_is_valid(ctx.buf) then
+      return
+    end
+    local opts = {
+      id = star.id,
+      virt_text = { { ch, star.hl } },
+      virt_text_win_col = star.col,
+      hl_mode = "combine",
+      priority = 90,
+    }
+    local ok, id = pcall(vim.api.nvim_buf_set_extmark, ctx.buf, ns, star.row, 0, opts)
+    if ok then
+      star.id = id
+    end
+  else
+    table.insert(queue, { filler_row = star.filler_row, col = star.col, char = ch, hl = star.hl })
   end
 end
 
-local function spawn_twinkle(win, ctx)
-  local info = win_text_info(win)
-  if not info then
+---Picks a random spawn slot across the *entire* visible window -- real
+---buffer lines and the blank below-EOF canvas alike -- weighted by how many
+---rows each region actually has.
+local function spawn_twinkle(ctx, layout, queue)
+  local cfg = state.cfg
+  if layout.total_rows <= 0 then
     return
   end
-  local cfg = state.cfg
-  local row = math.random(info.topline, info.botline) - 1
-  local line = get_line(ctx.buf, row)
-  local ranges = safe_ranges(line, info.width, cfg.margin)
-  local col = pick_col(ranges)
-  if not col then
-    return
+  local pick = math.random(0, layout.total_rows - 1)
+
+  local star
+  if pick < layout.real_rows then
+    local row = layout.topline - 1 + pick
+    local line = get_line(ctx.buf, row)
+    local ranges = safe_ranges(line, layout.width, cfg.margin)
+    local col = pick_col(ranges)
+    if not col then
+      return
+    end
+    star = { region = "buffer", row = row, col = col }
+  else
+    local fr = pick - layout.real_rows
+    local col = math.random(0, layout.width - 1)
+    star = { region = "filler", filler_row = fr, col = col }
   end
 
-  local color_idx = math.random(1, #cfg.colors)
-  local star = {
-    kind = "twinkle",
-    row = row,
-    col = col,
-    stage = 1,
-    dir = 1,
-    age = 0,
-    life = math.random(cfg.min_life, cfg.max_life),
-    hl = highlights.color_group(color_idx),
-    id = nil,
-  }
-  render_twinkle(ctx, star)
+  star.kind = "twinkle"
+  star.stage = 1
+  star.dir = 1
+  star.age = 0
+  star.life = math.random(cfg.min_life, cfg.max_life)
+  star.hl = highlights.color_group(math.random(1, #cfg.colors))
+  star.id = nil
+
+  render_twinkle(ctx, star, queue)
   table.insert(ctx.stars, star)
 end
 
@@ -233,7 +279,7 @@ local function update_twinkle(ctx, star)
   local cfg = state.cfg
   star.age = star.age + 1
   if star.age >= star.life then
-    if star.id then
+    if star.region == "buffer" and star.id then
       pcall(vim.api.nvim_buf_del_extmark, ctx.buf, ns, star.id)
     end
     return false
@@ -247,16 +293,16 @@ local function update_twinkle(ctx, star)
     star.stage = 1
     star.dir = 1
   end
-
-  render_twinkle(ctx, star)
   return true
 end
 
 -- ============================================================================
--- Falling shooting stars (with fading trail)
+-- Falling shooting stars -- these now fall straight through real code lines
+-- and keep going into the blank canvas below your file, all the way to the
+-- bottom of the window.
 -- ============================================================================
 
-local function draw_falling(ctx, star)
+local function draw_falling(ctx, star, queue)
   for _, id in ipairs(star.marks) do
     pcall(vim.api.nvim_buf_del_extmark, ctx.buf, ns, id)
   end
@@ -265,44 +311,56 @@ local function draw_falling(ctx, star)
   local cfg = state.cfg
   local trail_hls = { "StarfallTrail3", "StarfallTrail2", "StarfallTrail1" }
   local n = #star.history
+
   for i, pos in ipairs(star.history) do
-    -- Oldest entries (low i) get the dimmest highlight.
-    local age_rank = n - i -- 0 = newest trail piece
+    local age_rank = n - i -- 0 = newest trail piece, closest to head
     local hl = trail_hls[math.max(1, #trail_hls - age_rank)]
     local ch = cfg.trail_chars[math.min(#cfg.trail_chars, age_rank + 1)]
-    local opts = {
-      virt_text = { { ch, hl } },
-      virt_text_win_col = pos.col,
-      hl_mode = "combine",
-      priority = 80,
-    }
-    local ok, id = pcall(vim.api.nvim_buf_set_extmark, ctx.buf, ns, pos.row, 0, opts)
-    if ok then
-      table.insert(star.marks, id)
+    if pos.region == "buffer" then
+      local opts = {
+        virt_text = { { ch, hl } },
+        virt_text_win_col = pos.col,
+        hl_mode = "combine",
+        priority = 80,
+      }
+      local ok, id = pcall(vim.api.nvim_buf_set_extmark, ctx.buf, ns, pos.row, 0, opts)
+      if ok then
+        table.insert(star.marks, id)
+      end
+    else
+      table.insert(queue, { filler_row = pos.filler_row, col = pos.col, char = ch, hl = hl })
     end
   end
 
-  local opts = {
-    virt_text = { { cfg.falling_char, "StarfallFallingHead" } },
-    virt_text_win_col = star.col,
-    hl_mode = "combine",
-    priority = 95,
-  }
-  local ok, id = pcall(vim.api.nvim_buf_set_extmark, ctx.buf, ns, star.row, 0, opts)
-  if ok then
-    table.insert(star.marks, id)
+  if star.region == "buffer" then
+    local opts = {
+      virt_text = { { cfg.falling_char, "StarfallFallingHead" } },
+      virt_text_win_col = star.col,
+      hl_mode = "combine",
+      priority = 95,
+    }
+    local ok, id = pcall(vim.api.nvim_buf_set_extmark, ctx.buf, ns, star.row, 0, opts)
+    if ok then
+      table.insert(star.marks, id)
+    end
+  else
+    table.insert(queue, {
+      filler_row = star.filler_row,
+      col = star.col,
+      char = cfg.falling_char,
+      hl = "StarfallFallingHead",
+    })
   end
 end
 
-local function spawn_falling(win, ctx)
-  local info = win_text_info(win)
-  if not info then
+local function spawn_falling(ctx, layout, queue)
+  local cfg = state.cfg
+  if layout.real_rows <= 0 then
     return
   end
-  local cfg = state.cfg
-  local row = info.topline - 1
+  local row = layout.topline - 1
   local line = get_line(ctx.buf, row)
-  local ranges = safe_ranges(line, info.width, cfg.margin)
+  local ranges = safe_ranges(line, layout.width, cfg.margin)
   local col = pick_col(ranges)
   if not col then
     return
@@ -310,22 +368,19 @@ local function spawn_falling(win, ctx)
 
   local star = {
     kind = "falling",
+    region = "buffer",
     row = row,
     col = col,
     fall_tick = 0,
     history = {},
     marks = {},
   }
-  draw_falling(ctx, star)
+  draw_falling(ctx, star, queue)
   table.insert(ctx.stars, star)
 end
 
 ---@return boolean alive
-local function update_falling(win, ctx, star)
-  local info = win_text_info(win)
-  if not info then
-    return false
-  end
+local function update_falling(ctx, star, layout)
   local cfg = state.cfg
 
   star.fall_tick = star.fall_tick + 1
@@ -334,31 +389,114 @@ local function update_falling(win, ctx, star)
   end
   star.fall_tick = 0
 
-  table.insert(star.history, { row = star.row, col = star.col })
+  if star.region == "buffer" then
+    table.insert(star.history, { region = "buffer", row = star.row, col = star.col })
+  else
+    table.insert(star.history, { region = "filler", filler_row = star.filler_row, col = star.col })
+  end
   while #star.history > cfg.trail_length do
     table.remove(star.history, 1)
   end
 
-  local new_row = star.row + 1
-  if new_row + 1 > info.botline then
-    return false -- reached the bottom of the visible area
+  if star.region == "buffer" then
+    local new_row = star.row + 1
+    if new_row >= layout.line_count then
+      -- Reached the end of the file: keep falling into the blank canvas
+      -- below EOF instead of despawning.
+      if layout.filler_rows <= 0 then
+        return false
+      end
+      star.region = "filler"
+      star.filler_row = 0
+      return true
+    end
+
+    local line = get_line(ctx.buf, new_row)
+    local ranges = safe_ranges(line, layout.width, cfg.margin)
+    local drift = math.random(-1, 1)
+    local new_col = star.col + drift
+    if not range_contains(ranges, new_col) then
+      new_col = star.col
+      if not range_contains(ranges, new_col) then
+        return false -- text has shifted into our path; despawn gracefully
+      end
+    end
+    star.row = new_row
+    star.col = new_col
+    return true
+  else
+    local new_fr = star.filler_row + 1
+    if new_fr >= layout.filler_rows then
+      return false -- hit the bottom edge of the window
+    end
+    local drift = math.random(-1, 1)
+    local new_col = star.col + drift
+    if new_col < 0 or new_col >= layout.width then
+      new_col = star.col
+    end
+    star.filler_row = new_fr
+    star.col = new_col
+    return true
+  end
+end
+
+-- ============================================================================
+-- The shared "below EOF" canvas: a single extmark using virt_lines to paint
+-- every filler-region star (ambient + falling heads + trails) for this
+-- window in one batch, sized to exactly fill the remaining blank rows.
+-- ============================================================================
+
+local function render_filler_block(ctx, layout, queue)
+  if layout.filler_rows <= 0 then
+    if ctx.filler_id then
+      pcall(vim.api.nvim_buf_del_extmark, ctx.buf, ns, ctx.filler_id)
+      ctx.filler_id = nil
+    end
+    return
   end
 
-  local line = get_line(ctx.buf, new_row)
-  local ranges = safe_ranges(line, info.width, cfg.margin)
-
-  local drift = math.random(-1, 1)
-  local new_col = star.col + drift
-  if not range_contains(ranges, new_col) then
-    new_col = star.col
-    if not range_contains(ranges, new_col) then
-      return false -- text has moved into our path; despawn gracefully
+  local rows = {}
+  for i = 0, layout.filler_rows - 1 do
+    rows[i] = {}
+  end
+  for _, item in ipairs(queue) do
+    if rows[item.filler_row] then
+      table.insert(rows[item.filler_row], item)
     end
   end
 
-  star.row = new_row
-  star.col = new_col
-  return true
+  local virt_lines = {}
+  for i = 0, layout.filler_rows - 1 do
+    local items = rows[i]
+    table.sort(items, function(a, b)
+      return a.col < b.col
+    end)
+    local chunks = {}
+    local cursor = 0
+    for _, it in ipairs(items) do
+      if it.col > cursor then
+        table.insert(chunks, { string.rep(" ", it.col - cursor), "Normal" })
+      end
+      if it.col >= cursor then
+        table.insert(chunks, { it.char, it.hl })
+        cursor = it.col + 1
+      end
+    end
+    if #chunks == 0 then
+      chunks = { { "", "Normal" } }
+    end
+    table.insert(virt_lines, chunks)
+  end
+
+  local opts = {
+    id = ctx.filler_id,
+    virt_lines = virt_lines,
+    priority = 90,
+  }
+  local ok, id = pcall(vim.api.nvim_buf_set_extmark, ctx.buf, ns, layout.last_row, 0, opts)
+  if ok then
+    ctx.filler_id = id
+  end
 end
 
 -- ============================================================================
@@ -369,7 +507,12 @@ local function tick_window(win, ctx)
   if not vim.api.nvim_win_is_valid(win) or not vim.api.nvim_buf_is_valid(ctx.buf) then
     return
   end
+  local layout = compute_layout(win, ctx.buf)
+  if not layout then
+    return
+  end
   local cfg = state.cfg
+  local queue = {} -- glyphs destined for the shared below-EOF canvas
 
   local alive = {}
   local twinkle_count, falling_count = 0, 0
@@ -377,12 +520,13 @@ local function tick_window(win, ctx)
   for _, star in ipairs(ctx.stars) do
     if star.kind == "twinkle" then
       if update_twinkle(ctx, star) then
+        render_twinkle(ctx, star, queue)
         twinkle_count = twinkle_count + 1
         table.insert(alive, star)
       end
     else
-      if update_falling(win, ctx, star) then
-        draw_falling(ctx, star)
+      if update_falling(ctx, star, layout) then
+        draw_falling(ctx, star, queue)
         falling_count = falling_count + 1
         table.insert(alive, star)
       else
@@ -395,11 +539,13 @@ local function tick_window(win, ctx)
   ctx.stars = alive
 
   if twinkle_count < cfg.density and math.random() < cfg.twinkle_spawn_chance then
-    spawn_twinkle(win, ctx)
+    spawn_twinkle(ctx, layout, queue)
   end
   if falling_count < cfg.falling_stars and math.random() < cfg.falling_spawn_chance then
-    spawn_falling(win, ctx)
+    spawn_falling(ctx, layout, queue)
   end
+
+  render_filler_block(ctx, layout, queue)
 end
 
 function M.tick()
