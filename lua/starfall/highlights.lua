@@ -22,6 +22,12 @@ function M.setup(cfg)
   vim.api.nvim_set_hl(0, "StarfallTrail1", { fg = cfg.falling_color, default = true })
   vim.api.nvim_set_hl(0, "StarfallTrail2", { fg = "#9a9a9a", default = true })
   vim.api.nvim_set_hl(0, "StarfallTrail3", { fg = "#4d4d4d", default = true })
+
+  -- Golden shooting-star head + fading gold trail.
+  vim.api.nvim_set_hl(0, "StarfallShootingHead", { fg = cfg.shooting_color, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "StarfallShootingTrail1", { fg = cfg.shooting_color, bold = true, default = true })
+  vim.api.nvim_set_hl(0, "StarfallShootingTrail2", { fg = "#c9a227", default = true })
+  vim.api.nvim_set_hl(0, "StarfallShootingTrail3", { fg = "#7a6216", default = true })
 end
 
 ---Returns the highlight group name for the i-th palette color.

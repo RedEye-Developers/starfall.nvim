@@ -11,7 +11,9 @@ a line, with a configurable safety margin. As you type, resize, or scroll,
 placement is re-checked live.
 
 - 🌌 Ambient twinkling stars that fade in/out through a glyph + color ramp
-- 🌠 Falling "shooting stars" with a fading 3-glyph comet trail
+- 🌧️ Gentle vertical falling stars with a fading comet trail
+- 🌟 Rare **golden shooting stars** that streak diagonally across the whole
+  window, fast, with their own fading gold tail
 - 🪟 Works across every normal split/window in the current tab at once
 - 🚫 Automatically skips pickers, trees, dashboards, help, etc.
 - ⚡ Pure `vim.uv`/`vim.loop` timer + extmarks — no external dependencies
@@ -86,7 +88,7 @@ All fields are optional; pass only what you want to override to `setup()` /
 ```lua
 require("starfall").setup({
   density        = 16,     -- ambient stars alive per window at once
-  falling_stars  = 2,      -- shooting stars alive per window at once
+  falling_stars  = 2,      -- gentle vertical falling stars alive per window at once
   fps            = 10,     -- animation ticks per second
 
   twinkle_chars  = { "·", "‧", "✦", "✧", "✩", "★", "✩", "✧", "✦", "‧", "·" },
@@ -97,6 +99,16 @@ require("starfall").setup({
   trail_chars    = { "·", "✦" },
   fall_speed     = 2,       -- lower = falls faster (ticks per row moved)
   trail_length   = 3,       -- how many glyphs long the comet trail is
+
+  -- Golden diagonal shooting star -- rare, fast, cross-screen streak.
+  shooting_stars        = 1,        -- max concurrent per window
+  shooting_spawn_chance = 0.015,    -- keep this low for rarity
+  shooting_char          = "★",
+  shooting_color         = "#ffd700",
+  shooting_trail_chars   = { "·", "✧", "✦" },
+  shooting_trail_length  = 4,
+  shooting_move_every    = 1,       -- 1 = moves every tick (fastest)
+  shooting_speed_col     = { 2, 3 }, -- random sideways step per move
 
   min_life       = 30,      -- ambient star minimum lifetime, in ticks
   max_life       = 70,
@@ -113,6 +125,26 @@ require("starfall").setup({
   },
 })
 ```
+
+### The golden shooting star
+
+This is a separate, rarer effect from the gentle vertical falling stars:
+
+- Enters from the left or right edge near the top of the visible area and
+  streaks diagonally (down + sideways every tick) all the way across the
+  window, exiting off the opposite side, off the bottom, or into the blank
+  canvas below your file.
+- Rendered in gold (`shooting_color`, default `#ffd700`) with its own fading
+  gold tail (`StarfallShootingHead` / `StarfallShootingTrail1-3`).
+- Capped at `shooting_stars` concurrent (default `1`) and gated by a low
+  per-tick `shooting_spawn_chance` (default `0.015`, i.e. rare), so it won't
+  show up constantly like the ambient/falling stars.
+- Still respects the same text-avoidance rules -- if its path would cross
+  over a character, the streak ends cleanly rather than jumping around it.
+
+Want it more/less often? Tune `shooting_spawn_chance` up or down. Want it
+faster/slower? Tune `shooting_speed_col` (bigger range = steeper, faster
+diagonal) or `shooting_move_every` (higher = slower).
 
 ### Tuning the vibe
 

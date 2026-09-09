@@ -297,25 +297,23 @@ local function update_twinkle(ctx, star)
 end
 
 -- ============================================================================
--- Falling shooting stars -- these now fall straight through real code lines
--- and keep going into the blank canvas below your file, all the way to the
--- bottom of the window.
+-- Shared trail renderer: both the vertical falling stars and the diagonal
+-- shooting stars are a moving head + a short fading trail behind it. This
+-- draws either kind, routing buffer-region pieces to their own extmark and
+-- filler-region pieces (below EOF) into the shared canvas queue.
 -- ============================================================================
 
-local function draw_falling(ctx, star, queue)
+local function draw_streak(ctx, star, queue, head_char, head_hl, trail_chars, trail_hls)
   for _, id in ipairs(star.marks) do
     pcall(vim.api.nvim_buf_del_extmark, ctx.buf, ns, id)
   end
   star.marks = {}
 
-  local cfg = state.cfg
-  local trail_hls = { "StarfallTrail3", "StarfallTrail2", "StarfallTrail1" }
   local n = #star.history
-
   for i, pos in ipairs(star.history) do
     local age_rank = n - i -- 0 = newest trail piece, closest to head
     local hl = trail_hls[math.max(1, #trail_hls - age_rank)]
-    local ch = cfg.trail_chars[math.min(#cfg.trail_chars, age_rank + 1)]
+    local ch = trail_chars[math.min(#trail_chars, age_rank + 1)]
     if pos.region == "buffer" then
       local opts = {
         virt_text = { { ch, hl } },
@@ -334,7 +332,7 @@ local function draw_falling(ctx, star, queue)
 
   if star.region == "buffer" then
     local opts = {
-      virt_text = { { cfg.falling_char, "StarfallFallingHead" } },
+      virt_text = { { head_char, head_hl } },
       virt_text_win_col = star.col,
       hl_mode = "combine",
       priority = 95,
@@ -344,13 +342,22 @@ local function draw_falling(ctx, star, queue)
       table.insert(star.marks, id)
     end
   else
-    table.insert(queue, {
-      filler_row = star.filler_row,
-      col = star.col,
-      char = cfg.falling_char,
-      hl = "StarfallFallingHead",
-    })
+    table.insert(queue, { filler_row = star.filler_row, col = star.col, char = head_char, hl = head_hl })
   end
+end
+
+-- ============================================================================
+-- Vertical falling stars -- fall straight through real code lines and keep
+-- going into the blank canvas below your file, all the way to the bottom.
+-- ============================================================================
+
+local function draw_falling(ctx, star, queue)
+  local cfg = state.cfg
+  draw_streak(
+    ctx, star, queue,
+    cfg.falling_char, "StarfallFallingHead",
+    cfg.trail_chars, { "StarfallTrail3", "StarfallTrail2", "StarfallTrail1" }
+  )
 end
 
 local function spawn_falling(ctx, layout, queue)
@@ -441,6 +448,132 @@ local function update_falling(ctx, star, layout)
 end
 
 -- ============================================================================
+-- Golden shooting stars -- rare, fast, diagonal streaks across the window.
+-- Unlike the gentle vertical falling stars, these move sideways as well as
+-- down each step, cutting a fast corner-to-corner path with a golden tail.
+-- ============================================================================
+
+local function draw_shooting(ctx, star, queue)
+  local cfg = state.cfg
+  draw_streak(
+    ctx, star, queue,
+    cfg.shooting_char, "StarfallShootingHead",
+    cfg.shooting_trail_chars, { "StarfallShootingTrail3", "StarfallShootingTrail2", "StarfallShootingTrail1" }
+  )
+end
+
+---Finds the safe column closest to the left (side=0) or right (side=1) edge
+---of the given ranges, so the streak can enter right at the window border.
+local function edge_col(ranges, side)
+  local best = nil
+  for _, r in ipairs(ranges) do
+    local candidate = (side == 0) and r[1] or (r[2] - 1)
+    if not best then
+      best = candidate
+    elseif side == 0 and candidate < best then
+      best = candidate
+    elseif side == 1 and candidate > best then
+      best = candidate
+    end
+  end
+  return best
+end
+
+local function spawn_shooting(ctx, layout, queue)
+  local cfg = state.cfg
+  if layout.real_rows <= 0 then
+    return
+  end
+
+  -- Start somewhere in the upper portion of the visible area, so the streak
+  -- has room to cross the rest of the window as it falls.
+  local span = math.max(1, math.floor(layout.real_rows * 0.4))
+  local row = layout.topline - 1 + math.random(0, span - 1)
+  local line = get_line(ctx.buf, row)
+  local ranges = safe_ranges(line, layout.width, cfg.margin)
+  if #ranges == 0 then
+    return
+  end
+
+  local side = math.random(0, 1) -- 0 = enters from the left, 1 = from the right
+  local col = edge_col(ranges, side)
+  if not col then
+    return
+  end
+
+  local speed = math.random(cfg.shooting_speed_col[1], cfg.shooting_speed_col[2])
+  local dx = (side == 0) and speed or -speed
+
+  local star = {
+    kind = "shooting",
+    region = "buffer",
+    row = row,
+    col = col,
+    dx = dx,
+    move_tick = 0,
+    history = {},
+    marks = {},
+  }
+  draw_shooting(ctx, star, queue)
+  table.insert(ctx.stars, star)
+end
+
+---@return boolean alive
+local function update_shooting(ctx, star, layout)
+  local cfg = state.cfg
+
+  star.move_tick = star.move_tick + 1
+  if star.move_tick < cfg.shooting_move_every then
+    return true
+  end
+  star.move_tick = 0
+
+  if star.region == "buffer" then
+    table.insert(star.history, { region = "buffer", row = star.row, col = star.col })
+  else
+    table.insert(star.history, { region = "filler", filler_row = star.filler_row, col = star.col })
+  end
+  while #star.history > cfg.shooting_trail_length do
+    table.remove(star.history, 1)
+  end
+
+  local new_col = star.col + star.dx
+  if new_col < 0 or new_col >= layout.width then
+    return false -- streaked off the side of the window -- a clean exit
+  end
+
+  if star.region == "buffer" then
+    local new_row = star.row + 1
+    if new_row >= layout.line_count then
+      if layout.filler_rows <= 0 then
+        return false
+      end
+      star.region = "filler"
+      star.filler_row = 0
+      star.col = new_col
+      return true
+    end
+
+    local line = get_line(ctx.buf, new_row)
+    local ranges = safe_ranges(line, layout.width, cfg.margin)
+    if not range_contains(ranges, new_col) then
+      return false -- crossed into text; end the streak cleanly rather than jump around
+    end
+    star.row = new_row
+    star.col = new_col
+    return true
+  else
+    local new_fr = star.filler_row + 1
+    if new_fr >= layout.filler_rows then
+      return false
+    end
+    star.filler_row = new_fr
+    star.col = new_col
+    return true
+  end
+end
+
+-- ============================================================================
 -- The shared "below EOF" canvas: a single extmark using virt_lines to paint
 -- every filler-region star (ambient + falling heads + trails) for this
 -- window in one batch, sized to exactly fill the remaining blank rows.
@@ -515,7 +648,7 @@ local function tick_window(win, ctx)
   local queue = {} -- glyphs destined for the shared below-EOF canvas
 
   local alive = {}
-  local twinkle_count, falling_count = 0, 0
+  local twinkle_count, falling_count, shooting_count = 0, 0, 0
 
   for _, star in ipairs(ctx.stars) do
     if star.kind == "twinkle" then
@@ -524,10 +657,20 @@ local function tick_window(win, ctx)
         twinkle_count = twinkle_count + 1
         table.insert(alive, star)
       end
-    else
+    elseif star.kind == "falling" then
       if update_falling(ctx, star, layout) then
         draw_falling(ctx, star, queue)
         falling_count = falling_count + 1
+        table.insert(alive, star)
+      else
+        for _, id in ipairs(star.marks) do
+          pcall(vim.api.nvim_buf_del_extmark, ctx.buf, ns, id)
+        end
+      end
+    else -- "shooting"
+      if update_shooting(ctx, star, layout) then
+        draw_shooting(ctx, star, queue)
+        shooting_count = shooting_count + 1
         table.insert(alive, star)
       else
         for _, id in ipairs(star.marks) do
@@ -543,6 +686,9 @@ local function tick_window(win, ctx)
   end
   if falling_count < cfg.falling_stars and math.random() < cfg.falling_spawn_chance then
     spawn_falling(ctx, layout, queue)
+  end
+  if shooting_count < cfg.shooting_stars and math.random() < cfg.shooting_spawn_chance then
+    spawn_shooting(ctx, layout, queue)
   end
 
   render_filler_block(ctx, layout, queue)
