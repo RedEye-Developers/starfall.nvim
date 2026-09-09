@@ -39,7 +39,8 @@ M.defaults = {
   -- Golden diagonal "shooting star" -- rare, fast, and crosses the window
   -- corner-to-corner, distinct from the gentle vertical falling stars above.
   shooting_stars = 1, -- max concurrent per window
-  shooting_spawn_chance = 0.015, -- checked once per tick; keep this low for rarity
+  shooting_max_per_minute = 3, -- hard cap: at most this many spawns per rolling 60s
+  shooting_spawn_chance = 0.05, -- per-tick attempt chance, gated by the cap above
   shooting_char = "★",
   shooting_color = "#ffd700", -- gold
   shooting_trail_chars = { "·", "✧", "✦" },

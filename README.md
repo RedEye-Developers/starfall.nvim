@@ -101,14 +101,15 @@ require("starfall").setup({
   trail_length   = 3,       -- how many glyphs long the comet trail is
 
   -- Golden diagonal shooting star -- rare, fast, cross-screen streak.
-  shooting_stars        = 1,        -- max concurrent per window
-  shooting_spawn_chance = 0.015,    -- keep this low for rarity
-  shooting_char          = "★",
-  shooting_color         = "#ffd700",
-  shooting_trail_chars   = { "·", "✧", "✦" },
-  shooting_trail_length  = 4,
-  shooting_move_every    = 1,       -- 1 = moves every tick (fastest)
-  shooting_speed_col     = { 2, 3 }, -- random sideways step per move
+  shooting_stars          = 1,          -- max concurrent per window
+  shooting_max_per_minute = 3,          -- hard cap: at most this many spawns per rolling 60s
+  shooting_spawn_chance   = 0.05,       -- per-tick attempt chance, gated by the cap above
+  shooting_char           = "★",
+  shooting_color          = "#ffd700",
+  shooting_trail_chars    = { "·", "✧", "✦" },
+  shooting_trail_length   = 4,
+  shooting_move_every     = 1,          -- 1 = moves every tick (fastest)
+  shooting_speed_col      = { 2, 3 },   -- random sideways step per move
 
   min_life       = 30,      -- ambient star minimum lifetime, in ticks
   max_life       = 70,
@@ -136,13 +137,14 @@ This is a separate, rarer effect from the gentle vertical falling stars:
   canvas below your file.
 - Rendered in gold (`shooting_color`, default `#ffd700`) with its own fading
   gold tail (`StarfallShootingHead` / `StarfallShootingTrail1-3`).
-- Capped at `shooting_stars` concurrent (default `1`) and gated by a low
-  per-tick `shooting_spawn_chance` (default `0.015`, i.e. rare), so it won't
-  show up constantly like the ambient/falling stars.
+- Hard-capped at `shooting_max_per_minute` spawns per rolling 60 seconds
+  (default `3`), on top of `shooting_stars` max concurrent (default `1`).
+  The per-tick `shooting_spawn_chance` just adds organic timing jitter
+  *within* that budget -- it can't push the total above the per-minute cap.
 - Still respects the same text-avoidance rules -- if its path would cross
   over a character, the streak ends cleanly rather than jumping around it.
 
-Want it more/less often? Tune `shooting_spawn_chance` up or down. Want it
+Want it more/less often? Tune `shooting_max_per_minute`. Want it
 faster/slower? Tune `shooting_speed_col` (bigger range = steeper, faster
 diagonal) or `shooting_move_every` (higher = slower).
 
