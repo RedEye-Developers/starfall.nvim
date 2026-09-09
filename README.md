@@ -20,7 +20,7 @@ placement is re-checked live.
 - 🧩 Two simple commands: `:StarfallStart` / `:StarfallStop` (plus `:StarfallToggle`)
 
 ## Preview
-[](https://github.com/RedEye-Developers/Test-Assets/blob/main/videos/money-haist-status.mp4)
+![video](https://raw.githubusercontent.com/RedEye-Developers/Test-Assets/main/videos/money-haist-status.mp4)
 
 ## Requirements
 
