@@ -19,6 +19,9 @@ placement is re-checked live.
 - ⚡ Pure `vim.uv`/`vim.loop` timer + extmarks — no external dependencies
 - 🧩 Two simple commands: `:StarfallStart` / `:StarfallStop` (plus `:StarfallToggle`)
 
+## Preview
+[](https://github.com/RedEye-Developers/Test-Assets/blob/main/videos/money-haist-status.mp4)
+
 ## Requirements
 
 - Neovim >= 0.9 (uses `nvim_buf_set_extmark` with `virt_text_win_col`)
