@@ -1,6 +1,6 @@
 # ✨ Starfall.nvim
 
-A tiny, beautiful ambient animation plugin for neovim: soft twinkling stars
+A tiny, beautiful ambient animation plugin for Neovim: soft twinkling stars
 drift and shimmer in the empty space around your code, and shooting stars
 occasionally streak down the window leaving a fading trail.
 
