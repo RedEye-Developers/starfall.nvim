@@ -1,6 +1,6 @@
-# ✨ starfall.nvim
+# ✨ Starfall.nvim
 
-A tiny, beautiful ambient animation plugin for Neovim: soft twinkling stars
+A tiny, beautiful ambient animation plugin for neovim: soft twinkling stars
 drift and shimmer in the empty space around your code, and shooting stars
 occasionally streak down the window leaving a fading trail.
 
@@ -30,7 +30,7 @@ https://github.com/user-attachments/assets/dab9585c-8e31-4f00-95da-2d1c982d2178
 
 ```lua
 {
-  "yourname/starfall.nvim",
+  "RedEye-Developers/starfall.nvim",
   cmd = { "StarfallStart", "StarfallStop", "StarfallToggle" },
   opts = {
     -- see "Configuration" below; {} for all defaults
@@ -46,7 +46,7 @@ If you'd rather call `setup()` yourself:
 
 ```lua
 {
-  "yourname/starfall.nvim",
+  "RedEye-Developers/starfall.nvim",
   cmd = { "StarfallStart", "StarfallStop", "StarfallToggle" },
   config = function()
     require("starfall").setup({
@@ -54,18 +54,6 @@ If you'd rather call `setup()` yourself:
       falling_stars = 3,
     })
   end,
-}
-```
-
-### Local / manual install (no git repo yet)
-
-If you're trying this out from a local folder before pushing it anywhere:
-
-```lua
-{
-  dir = "~/path/to/starfall.nvim",
-  cmd = { "StarfallStart", "StarfallStop", "StarfallToggle" },
-  opts = {},
 }
 ```
 
